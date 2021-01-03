@@ -28,7 +28,7 @@ void measurement_discharge(void)
   pinMode(PIN_V, OUTPUT);
   digitalWrite(PIN_G, LOW);
   digitalWrite(PIN_V, LOW);
-  delay(10);
+  delay(100);
 }
 
 
@@ -126,6 +126,56 @@ float measurement_large(void)
 
   // Compute the capacitance from the V(t) for and RC circuit.
   return -(float)t_charge * 1e-6 / Rpull / log(1.0 - (float)analog_val / (float)ADC_MAX);
+}
+
+
+// This uses the same method as measurement_large, but it gets impatient
+// and stops waiting after half a second and takes the measurement anyway.
+// This means that larger capacitors can me measured slightly faster, but
+// it has trouble resolving if they're *too* large, like over 500uF or so.
+float measurement_fastlarge(void)
+{
+  unsigned long t_start;
+  unsigned long t_now;
+  unsigned long t_end;
+  unsigned long t_charge;
+  int analog_val;
+  int dig_val;
+  float cap_val;
+
+  // Make sure the capacitor is discharged so we start fresh.
+  measurement_discharge();
+
+  // Ground one pin and connect the pullup to Vcc on the other.
+  pinMode(PIN_G, OUTPUT);
+  digitalWrite(PIN_G, LOW);
+  pinMode(PIN_V, INPUT_PULLUP);
+
+  // Wait for the pulled-up input to read 1 when the capacitor is charged,
+  // or exit early if we wait long enough and get impatient.
+  t_start = micros();
+  do
+  {
+    t_now = micros();
+    t_charge = t_now > t_start ? t_now - t_start : t_start - t_now;
+  } while (!digitalRead(PIN_V) && t_charge < 500000);
+  t_end = micros();
+
+  // Stop charging and read the voltage the cap was charged to.
+  pinMode(PIN_V, INPUT);
+  analog_val = analogRead(PIN_V);
+
+  // Clean up after ourselves.
+  measurement_discharge();
+
+  // Charge time is the difference between start and end times.
+  // The conditional is to deal with the micros() timer overflowing.
+  t_charge = t_end > t_start ? t_end - t_start : t_start - t_end;
+
+  // Compute the capacitance from the V(t) for and RC circuit.
+  cap_val = -(float)t_charge * 1e-6 / Rpull / log(1.0 - (float)analog_val / (float)ADC_MAX);
+
+  return cap_val;
 }
 
 
@@ -257,15 +307,42 @@ void setup() {
 }
 
 
+// We average the value over time to give a more stable display.
+float average_value = 0;
+
+
 void loop() {
   float capacitor_value;
+  float value_error;
 
+  // Try the voltage-divider measurement for small capacitors first.
+  // If the capacitor is too large, try again with the time-to-charge method.
   capacitor_value = measurement_small();
   if (capacitor_value == INF)
-    capacitor_value = measurement_large();
+    capacitor_value = measurement_fastlarge();
 
-  display_show(capacitor_value);
-  display_show_serial(capacitor_value);
 
+  // How different is this single measurement from our average measurement?
+  value_error = abs((capacitor_value - average_value) / average_value);
+  if (value_error > .2)
+  {
+    // If the difference > 20%, the user probably switched out the cacpacitor
+    // with a new one, so reset the running average to this current measurement.
+    average_value = capacitor_value;
+  }
+  else
+  {
+    // This measurement is close to the average we've seen so far, so it's
+    // probably a slightly-different measurement of the same capacitor.  Use
+    // this new measurement to update our average, which creates a more
+    // stable display.  We take 80% of the current average and 20% of the new
+    // measurement.
+    average_value = (.8 * average_value) + (.2 * capacitor_value);
+  }
+
+
+  // Inform the user
+  display_show(average_value);
+  display_show_serial(average_value);
   delay(100);
 }
